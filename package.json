@@ -20,6 +20,7 @@
     "dev": "vite",
     "dev:tech": "cross-env VITE_VARIANT=tech vite",
     "dev:finance": "cross-env VITE_VARIANT=finance vite",
+    "dev:fx": "cross-env VITE_VARIANT=fx-7ccy vite",
     "dev:happy": "cross-env VITE_VARIANT=happy vite",
     "dev:commodity": "cross-env VITE_VARIANT=commodity vite",
     "postinstall": "cd blog-site && npm ci --prefer-offline",

@@ -13,7 +13,14 @@ const FINANCIAL_INSTRUMENTS = [
   { name: '2-Year T-Note',     code: 'ZT', pattern: /^UST 2Y NOTE - CHICAGO/i },
   { name: 'EUR/USD',           code: 'EC', pattern: /EURO FX - CHICAGO/i },
   { name: 'USD/JPY',           code: 'JY', pattern: /JAPANESE YEN - CHICAGO/i },
+  { name: 'GBP/USD',           code: 'BP', pattern: /BRITISH POUND/i },
+  { name: 'USD/CHF',           code: 'SF', pattern: /SWISS FRANC/i },
+  { name: 'USD/CAD',           code: 'CD', pattern: /CANADIAN DOLLAR/i },
+  { name: 'NZD/USD',           code: 'NE', pattern: /NEW ZEALAND/i },
 ];
+
+// FX通貨先物のコード（52週ヒストリー取得対象）
+const FX_CODES = new Set(['EC', 'JY', 'BP', 'SF', 'CD', 'NE']);
 
 const COMMODITY_INSTRUMENTS = [
   { name: 'Gold',            code: 'GC', contractCode: '088691' },
@@ -51,13 +58,52 @@ export function computeNextCotRelease(reportDate) {
 async function fetchSocrata(datasetId, extraParams = '') {
   const url =
     `https://publicreporting.cftc.gov/resource/${datasetId}.json` +
-    `?$limit=200&$order=report_date_as_yyyy_mm_dd%20DESC&$where=futonly_or_combined%3D%27Combined%27${extraParams}`;
+    `?$limit=800&$order=report_date_as_yyyy_mm_dd%20DESC&$where=futonly_or_combined%3D%27Combined%27${extraParams}`;
   const resp = await fetch(url, {
     headers: { 'User-Agent': CHROME_UA, Accept: 'application/json' },
     signal: AbortSignal.timeout(30_000),
   });
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
   return resp.json();
+}
+
+// 52週ヒストリーを取得して折り込み度パーセンタイルを計算する
+async function fetchHistoricalNetPositions(likePattern) {
+  const where = encodeURIComponent(
+    `futonly_or_combined='Combined' AND market_and_exchange_names LIKE '%${likePattern}%'`
+  );
+  const url =
+    `https://publicreporting.cftc.gov/resource/yw9f-hn96.json` +
+    `?$limit=60&$order=report_date_as_yyyy_mm_dd%20DESC&$where=${where}`;
+  const resp = await fetch(url, {
+    headers: { 'User-Agent': CHROME_UA, Accept: 'application/json' },
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!resp.ok) return [];
+  return resp.json();
+}
+
+function calcPercentile52w(rows) {
+  const toNum = v => { const n = parseInt(String(v ?? '').replace(/,/g, ''), 10); return Number.isNaN(n) ? 0 : n; };
+  const nets = rows.map(r => {
+    const l = toNum(r.asset_mgr_positions_long);
+    const s = toNum(r.asset_mgr_positions_short);
+    const g = Math.max(l + s, 1);
+    return ((l - s) / g) * 100;
+  }).filter(v => Number.isFinite(v));
+  if (nets.length < 4) return null;
+  const hi = Math.max(...nets);
+  const lo = Math.min(...nets);
+  const current = nets[0];
+  const range = hi - lo;
+  const pct = range > 0 ? Math.round(((current - lo) / range) * 100) : 50;
+  let crowded;
+  if (pct >= 85) crowded = 'extreme_long';
+  else if (pct >= 65) crowded = 'long';
+  else if (pct <= 15) crowded = 'extreme_short';
+  else if (pct <= 35) crowded = 'short';
+  else crowded = 'neutral';
+  return { percentile52w: pct, hi52w: parseFloat(hi.toFixed(2)), lo52w: parseFloat(lo.toFixed(2)), crowded, historyWeeks: nets.length };
 }
 
 export function buildInstrument(target, currentRow, priorRow, kind) {
@@ -163,13 +209,39 @@ async function fetchCotData() {
     return [matches[0], matches[1]];
   };
 
+  // FX通貨の52週ヒストリーを並列取得
+  const FX_HISTORY_PATTERNS = {
+    EC: 'EURO FX',
+    JY: 'JAPANESE YEN',
+    BP: 'BRITISH POUND',
+    SF: 'SWISS FRANC',
+    CD: 'CANADIAN DOLLAR',
+    NE: 'NEW ZEALAND',
+  };
+  const historyResults = await Promise.allSettled(
+    Object.entries(FX_HISTORY_PATTERNS).map(async ([code, pattern]) => {
+      const rows = await fetchHistoricalNetPositions(pattern);
+      return { code, percentileData: calcPercentile52w(rows) };
+    })
+  );
+  const percentileMap = {};
+  for (const r of historyResults) {
+    if (r.status === 'fulfilled' && r.value.percentileData) {
+      percentileMap[r.value.code] = r.value.percentileData;
+    }
+  }
+
   for (const target of FINANCIAL_INSTRUMENTS) {
     const [current, prior] = findPair(financialRows, r => target.pattern.test(r.market_and_exchange_names ?? ''));
     if (!current) { console.warn(`  CFTC: no row for ${target.name}`); continue; }
     const inst = buildInstrument(target, current, prior, 'financial');
+    if (FX_CODES.has(inst.code) && percentileMap[inst.code]) {
+      Object.assign(inst, percentileMap[inst.code]);
+    }
     if (inst.reportDate && !latestReportDate) latestReportDate = inst.reportDate;
     instruments.push(inst);
-    console.log(`  ${inst.code}: MM net ${inst.managedMoney.netPct}% Δ${inst.managedMoney.wowNetDelta}, OI ${inst.openInterest}, date=${inst.reportDate}`);
+    const pctLabel = inst.percentile52w != null ? ` pct52w=${inst.percentile52w}%(${inst.crowded})` : '';
+    console.log(`  ${inst.code}: MM net ${inst.managedMoney.netPct}% Δ${inst.managedMoney.wowNetDelta}, OI ${inst.openInterest}${pctLabel}`);
   }
 
   for (const target of COMMODITY_INSTRUMENTS) {

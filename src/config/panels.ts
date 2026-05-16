@@ -492,6 +492,32 @@ const FINANCE_PANELS: Record<string, PanelConfig> = {
   'latest-brief': { name: 'Latest Brief', enabled: true, priority: 1, premium: 'locked' as const },
 };
 
+// FX 7-Currency variant panels (NZD / CHF / GBP / USD / JPY / EUR / CAD)
+const FX_7CCY_PANELS: Record<string, PanelConfig> = {
+  'fx-policy-rates':    { name: 'Policy Rates (7 CCY)',      enabled: true,  priority: 1 },
+  'fx-calendar':        { name: 'FX Economic Calendar',      enabled: true,  priority: 1 },
+  'fx-positioning':     { name: 'FX COT Positioning',        enabled: true,  priority: 1 },
+  'fx-volatility':      { name: 'FX Volatility & Range',     enabled: true,  priority: 1 },
+  map:                  { name: 'FX Map',                    enabled: true,  priority: 1 },
+  'live-news':          { name: 'FX Headlines',              enabled: true,  priority: 1 },
+  forex:                { name: 'Forex & Currencies',        enabled: true,  priority: 1 },
+  centralbanks:         { name: 'Central Bank Watch',        enabled: true,  priority: 1 },
+  'yield-curve':        { name: 'Yield Curves',              enabled: true,  priority: 1 },
+  'macro-signals':      { name: 'Market Radar',              enabled: true,  priority: 1 },
+  economic:             { name: 'Economic Data',             enabled: true,  priority: 1 },
+  'economic-calendar':  { name: 'Economic Calendar',         enabled: true,  priority: 1 },
+  'cot-positioning':    { name: 'COT Positioning',           enabled: true,  priority: 1 },
+  'daily-market-brief': { name: 'Daily Market Brief',        enabled: true,  priority: 1, premium: 'locked' as const },
+  insights:             { name: 'AI FX Insights',            enabled: true,  priority: 1 },
+  bonds:                { name: 'Fixed Income',              enabled: true,  priority: 2 },
+  'fear-greed':         { name: 'Fear & Greed',              enabled: true,  priority: 2 },
+  'market-breadth':     { name: 'Market Breadth',            enabled: true,  priority: 2 },
+  derivatives:          { name: 'Derivatives & Options',     enabled: true,  priority: 2 },
+  'markets-news':       { name: 'Markets News',              enabled: true,  priority: 2 },
+  'economic-news':      { name: 'Economic News',             enabled: true,  priority: 2 },
+  monitors:             { name: 'My Monitors',               enabled: true,  priority: 2 },
+};
+
 const FINANCE_MAP_LAYERS: MapLayers = {
   gpsJamming: false,
   satellites: false,
@@ -1095,6 +1121,7 @@ export const ALL_PANELS: Record<string, PanelConfig> = {
   ...ENERGY_PANELS,
   ...TECH_PANELS,
   ...FINANCE_PANELS,
+  ...FX_7CCY_PANELS,
   ...FULL_PANELS,
 };
 
@@ -1103,6 +1130,7 @@ export const VARIANT_DEFAULTS: Record<string, string[]> = {
   full:      Object.keys(FULL_PANELS),
   tech:      Object.keys(TECH_PANELS),
   finance:   Object.keys(FINANCE_PANELS),
+  'fx-7ccy': Object.keys(FX_7CCY_PANELS),
   commodity: Object.keys(COMMODITY_PANELS),
   energy:    Object.keys(ENERGY_PANELS),
   happy:     Object.keys(HAPPY_PANELS),
@@ -1135,6 +1163,11 @@ export const VARIANT_PANEL_OVERRIDES: Partial<Record<string, Partial<Record<stri
   },
   happy: {
     map:         { name: 'World Map' },
+  },
+  'fx-7ccy': {
+    map:         { name: 'FX Global Map' },
+    'live-news': { name: 'FX Headlines' },
+    insights:    { name: 'AI FX Insights' },
   },
 };
 
@@ -1189,7 +1222,9 @@ export const DEFAULT_MAP_LAYERS = SITE_VARIANT === 'happy'
         ? COMMODITY_MAP_LAYERS
         : SITE_VARIANT === 'energy'
           ? ENERGY_MAP_LAYERS
-          : FULL_MAP_LAYERS;
+          : SITE_VARIANT === 'fx-7ccy'
+            ? FINANCE_MAP_LAYERS
+            : FULL_MAP_LAYERS;
 
 export const MOBILE_DEFAULT_MAP_LAYERS = SITE_VARIANT === 'happy'
   ? HAPPY_MOBILE_MAP_LAYERS
@@ -1201,7 +1236,9 @@ export const MOBILE_DEFAULT_MAP_LAYERS = SITE_VARIANT === 'happy'
         ? COMMODITY_MOBILE_MAP_LAYERS
         : SITE_VARIANT === 'energy'
           ? ENERGY_MOBILE_MAP_LAYERS
-          : FULL_MOBILE_MAP_LAYERS;
+          : SITE_VARIANT === 'fx-7ccy'
+            ? FINANCE_MOBILE_MAP_LAYERS
+            : FULL_MOBILE_MAP_LAYERS;
 
 /** Maps map-layer toggle keys to their data-freshness source IDs (single source of truth). */
 export const LAYER_TO_SOURCE: Partial<Record<keyof MapLayers, DataSourceId[]>> = {

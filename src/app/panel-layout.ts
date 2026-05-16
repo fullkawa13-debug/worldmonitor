@@ -84,6 +84,10 @@ import {
   WsbTickerScannerPanel,
   AAIISentimentPanel,
   EnergyCrisisPanel,
+  FxPolicyRatesPanel,
+  FxCalendarPanel,
+  FxPositioningPanel,
+  FxVolatilityPanel,
 } from '@/components';
 import { SatelliteFiresPanel } from '@/components/SatelliteFiresPanel';
 import { focusInvestmentOnMap } from '@/services/investments-focus';
@@ -1315,6 +1319,10 @@ export class PanelLayoutManager implements AppModule {
       import('@/components/RegulationPanel').then(m => new m.RegulationPanel('ai-regulation')),
     );
 
+    this.createPanel('fx-policy-rates', () => new FxPolicyRatesPanel());
+    this.createPanel('fx-calendar', () => new FxCalendarPanel());
+    this.createPanel('fx-positioning', () => new FxPositioningPanel());
+    this.createPanel('fx-volatility', () => new FxVolatilityPanel());
     this.createPanel('macro-signals', () => new MacroSignalsPanel());
     this.createPanel('fear-greed', () => new FearGreedPanel());
     this.createPanel('aaii-sentiment', () => new AAIISentimentPanel());

@@ -55,6 +55,10 @@ import type { YieldCurvePanel } from '@/components/YieldCurvePanel';
 import type { EarningsCalendarPanel } from '@/components/EarningsCalendarPanel';
 import type { EconomicCalendarPanel } from '@/components/EconomicCalendarPanel';
 import type { CotPositioningPanel } from '@/components/CotPositioningPanel';
+import type { FxPolicyRatesPanel } from '@/components/FxPolicyRatesPanel';
+import type { FxCalendarPanel } from '@/components/FxCalendarPanel';
+import type { FxPositioningPanel } from '@/components/FxPositioningPanel';
+import type { FxVolatilityPanel } from '@/components/FxVolatilityPanel';
 import type { LiquidityShiftsPanel } from '@/components/LiquidityShiftsPanel';
 import type { PositioningPanel } from '@/components/PositioningPanel';
 import type { GoldIntelligencePanel } from '@/components/GoldIntelligencePanel';
@@ -403,6 +407,22 @@ export class App {
     if (shouldPrime('cot-positioning')) {
       const panel = this.state.panels['cot-positioning'] as CotPositioningPanel | undefined;
       if (panel) primeTask('cot-positioning', () => panel.fetchData());
+    }
+    if (shouldPrime('fx-policy-rates')) {
+      const panel = this.state.panels['fx-policy-rates'] as FxPolicyRatesPanel | undefined;
+      if (panel) primeTask('fx-policy-rates', () => panel.fetchData());
+    }
+    if (shouldPrime('fx-calendar')) {
+      const panel = this.state.panels['fx-calendar'] as FxCalendarPanel | undefined;
+      if (panel) primeTask('fx-calendar', () => panel.fetchData());
+    }
+    if (shouldPrime('fx-positioning')) {
+      const panel = this.state.panels['fx-positioning'] as FxPositioningPanel | undefined;
+      if (panel) primeTask('fx-positioning', () => panel.fetchData());
+    }
+    if (shouldPrime('fx-volatility')) {
+      const panel = this.state.panels['fx-volatility'] as FxVolatilityPanel | undefined;
+      if (panel) primeTask('fx-volatility', () => panel.fetchData());
     }
     if (shouldPrime('liquidity-shifts')) {
       const panel = this.state.panels['liquidity-shifts'] as LiquidityShiftsPanel | undefined;
@@ -1749,6 +1769,30 @@ export class App {
       () => (this.state.panels['cot-positioning'] as CotPositioningPanel).fetchData(),
       REFRESH_INTERVALS.cotPositioning,
       () => this.isPanelNearViewport('cot-positioning')
+    );
+    this.refreshScheduler.scheduleRefresh(
+      'fx-policy-rates',
+      () => (this.state.panels['fx-policy-rates'] as FxPolicyRatesPanel | undefined)?.fetchData() ?? Promise.resolve(false),
+      REFRESH_INTERVALS.cotPositioning,
+      () => this.isPanelNearViewport('fx-policy-rates')
+    );
+    this.refreshScheduler.scheduleRefresh(
+      'fx-calendar',
+      () => (this.state.panels['fx-calendar'] as FxCalendarPanel | undefined)?.fetchData() ?? Promise.resolve(false),
+      REFRESH_INTERVALS.economicCalendar,
+      () => this.isPanelNearViewport('fx-calendar')
+    );
+    this.refreshScheduler.scheduleRefresh(
+      'fx-positioning',
+      () => (this.state.panels['fx-positioning'] as FxPositioningPanel | undefined)?.fetchData() ?? Promise.resolve(false),
+      REFRESH_INTERVALS.cotPositioning,
+      () => this.isPanelNearViewport('fx-positioning')
+    );
+    this.refreshScheduler.scheduleRefresh(
+      'fx-volatility',
+      () => (this.state.panels['fx-volatility'] as FxVolatilityPanel | undefined)?.fetchData() ?? Promise.resolve(false),
+      REFRESH_INTERVALS.cotPositioning,
+      () => this.isPanelNearViewport('fx-volatility')
     );
     this.refreshScheduler.scheduleRefresh(
       'gold-intelligence',
