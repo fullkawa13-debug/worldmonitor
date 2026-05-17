@@ -59,6 +59,7 @@ import type { FxPolicyRatesPanel } from '@/components/FxPolicyRatesPanel';
 import type { FxCalendarPanel } from '@/components/FxCalendarPanel';
 import type { FxPositioningPanel } from '@/components/FxPositioningPanel';
 import type { FxVolatilityPanel } from '@/components/FxVolatilityPanel';
+import type { FxAiInsightsPanel } from '@/components/FxAiInsightsPanel';
 import type { LiquidityShiftsPanel } from '@/components/LiquidityShiftsPanel';
 import type { PositioningPanel } from '@/components/PositioningPanel';
 import type { GoldIntelligencePanel } from '@/components/GoldIntelligencePanel';
@@ -424,6 +425,10 @@ export class App {
       const panel = this.state.panels['fx-volatility'] as FxVolatilityPanel | undefined;
       if (panel) primeTask('fx-volatility', () => panel.fetchData());
     }
+    if (shouldPrime('fx-ai-insights')) {
+      const panel = this.state.panels['fx-ai-insights'] as FxAiInsightsPanel | undefined;
+      if (panel) primeTask('fx-ai-insights', () => panel.fetchData());
+    }
     if (shouldPrime('liquidity-shifts')) {
       const panel = this.state.panels['liquidity-shifts'] as LiquidityShiftsPanel | undefined;
       if (panel) primeTask('liquidity-shifts', () => panel.fetchData());
@@ -540,6 +545,12 @@ export class App {
           panelSettings[key] = { ...getEffectivePanelConfig(key, currentVariant) };
         }
       }
+      // Sync panel display names from variant defaults
+      for (const [key, cfg] of Object.entries(DEFAULT_PANELS)) {
+        if (panelSettings[key] && cfg.name) {
+          panelSettings[key] = { ...panelSettings[key]!, name: cfg.name };
+        }
+      }
     } else {
       mapLayers = normalizeExclusiveChoropleths(
         sanitizeLayersForVariant(
@@ -551,6 +562,13 @@ export class App {
         STORAGE_KEYS.panels,
         DEFAULT_PANELS
       );
+
+      // Sync panel display names from variant defaults (names may have been localized)
+      for (const [key, cfg] of Object.entries(DEFAULT_PANELS)) {
+        if (panelSettings[key] && cfg.name) {
+          panelSettings[key] = { ...panelSettings[key]!, name: cfg.name };
+        }
+      }
 
       // One-time migration: preserve user preferences across panel key renames.
       const PANEL_KEY_RENAMES_MIGRATION_KEY = 'worldmonitor-panel-key-renames-v2.6.8';
@@ -1793,6 +1811,12 @@ export class App {
       () => (this.state.panels['fx-volatility'] as FxVolatilityPanel | undefined)?.fetchData() ?? Promise.resolve(false),
       REFRESH_INTERVALS.cotPositioning,
       () => this.isPanelNearViewport('fx-volatility')
+    );
+    this.refreshScheduler.scheduleRefresh(
+      'fx-ai-insights',
+      () => (this.state.panels['fx-ai-insights'] as FxAiInsightsPanel | undefined)?.fetchData() ?? Promise.resolve(false),
+      REFRESH_INTERVALS.cotPositioning,
+      () => this.isPanelNearViewport('fx-ai-insights')
     );
     this.refreshScheduler.scheduleRefresh(
       'gold-intelligence',

@@ -722,6 +722,265 @@ function gpsjamDevPlugin(): Plugin {
   };
 }
 
+/**
+ * FX custom API plugin — serves Redis-seeded data at paths the FX variant panels expect.
+ * These are lightweight Redis reads that bypass the sebuf RPC layer.
+ */
+function fxDataPlugin(): Plugin {
+  const ROUTES: Record<string, string> = {
+    '/api/market/cot-enhanced': 'market:cot:v1',
+    '/api/market/fx-vol': 'market:fx-vol:v1',
+  };
+
+  async function fetchRedisKey(key: string): Promise<unknown | null> {
+    const url = process.env.UPSTASH_REDIS_REST_URL;
+    const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+    if (!url || !token) return null;
+    const resp = await fetch(`${url}/get/${encodeURIComponent(key)}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!resp.ok) return null;
+    const json = (await resp.json()) as { result?: string };
+    if (!json.result) return null;
+    const parsed = JSON.parse(json.result);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed._seed) {
+      return parsed.data;
+    }
+    return parsed;
+  }
+
+  return {
+    name: 'fx-data',
+    configureServer(server) {
+      server.middlewares.use(async (req, res, next) => {
+        const pathname = req.url?.split('?')[0];
+        if (!pathname || !ROUTES[pathname]) return next();
+
+        try {
+          const data = await fetchRedisKey(ROUTES[pathname]);
+          if (!data) {
+            res.statusCode = 503;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ unavailable: true, error: 'No data in Redis. Run the seed script.' }));
+            return;
+          }
+          res.setHeader('Content-Type', 'application/json');
+          res.setHeader('Cache-Control', 'public, max-age=300');
+          res.end(JSON.stringify(data));
+        } catch (err: any) {
+          res.statusCode = 502;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ unavailable: true, error: err.message || 'Redis fetch failed' }));
+        }
+      });
+    },
+  };
+}
+
+/**
+ * FX AI Insights plugin — COT/Vol/Calendarデータを集約してGemini APIで日本語分析を生成。
+ * Gemini無料枠で動作。GEMINI_API_KEY が未設定なら静的ルールベースにフォールバック。
+ */
+function fxAiInsightsPlugin(): Plugin {
+  const REDIS_KEYS = {
+    cot: 'market:cot:v1',
+    vol: 'market:fx-vol:v1',
+    calendar: 'economic:econ-calendar:v1',
+  };
+
+  async function fetchRedisKey(key: string): Promise<unknown | null> {
+    const url = process.env.UPSTASH_REDIS_REST_URL;
+    const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+    if (!url || !token) return null;
+    const resp = await fetch(`${url}/get/${encodeURIComponent(key)}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!resp.ok) return null;
+    const json = (await resp.json()) as { result?: string };
+    if (!json.result) return null;
+    const parsed = JSON.parse(json.result);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed._seed) {
+      return parsed.data;
+    }
+    return parsed;
+  }
+
+  interface CotInst {
+    code: string; name: string; reportDate: string; netPct: number;
+    managedMoney?: { netPct: number; wowNetDelta: number };
+    percentile52w?: number; crowded?: string;
+  }
+  interface VolPair {
+    pair: string; label: string; spot: number | null;
+    volUsed: number | null; volSource: string;
+    dailyRange: number | null; weeklyRange: number | null;
+  }
+  interface CalEvent { title?: string; date?: string; type?: string }
+
+  function buildRuleBasedAlerts(cot: CotInst[], vol: VolPair[]): string[] {
+    const alerts: string[] = [];
+    const FX_CODES: Record<string, string> = { EC: 'EUR', JY: 'JPY', BP: 'GBP', SF: 'CHF', CD: 'CAD', NE: 'NZD' };
+    for (const inst of cot) {
+      const label = FX_CODES[inst.code] || inst.code;
+      const pct = inst.percentile52w ?? 0;
+      const crowd = inst.crowded ?? 'neutral';
+      if (crowd === 'extreme_long' || crowd === 'extreme_short') {
+        const dir = crowd === 'extreme_long' ? '買い越し' : '売り越し';
+        alerts.push(`⚠️ 要警戒: ${label} の投機筋ポジションが${dir}極端水準（52週${pct}%）。反転リスクに注意。`);
+      } else if (pct >= 75 || pct <= 25) {
+        const dir = pct >= 75 ? '買い越し寄り' : '売り越し寄り';
+        alerts.push(`📊 ${label}: ポジション偏り ${pct}%（${dir}）。トレンド継続 or 巻き戻しに注目。`);
+      }
+    }
+    for (const p of vol) {
+      if (p.volUsed && p.volUsed >= 12) {
+        alerts.push(`📈 ${p.label}: 年率ボラ ${p.volUsed.toFixed(1)}% — 高ボラ環境。日次想定レンジ ±${p.dailyRange ?? '?'}に注意。`);
+      }
+    }
+    if (alerts.length === 0) {
+      alerts.push('✅ 現時点で特段のアラートなし。ポジション・ボラティリティとも通常範囲内。');
+    }
+    return alerts;
+  }
+
+  function buildPrompt(cot: CotInst[], vol: VolPair[], events: CalEvent[]): string {
+    const FX_CODES: Record<string, string> = { EC: 'EUR', JY: 'JPY', BP: 'GBP', SF: 'CHF', CD: 'CAD', NE: 'NZD' };
+
+    const cotSummary = cot.map(i => {
+      const label = FX_CODES[i.code] || i.code;
+      const mm = i.managedMoney;
+      return `${label}: net=${mm?.netPct?.toFixed(1) ?? i.netPct?.toFixed(1)}%, 52週=${i.percentile52w ?? '?'}%(${i.crowded ?? '?'}), WoW変化=${mm?.wowNetDelta ?? '?'}`;
+    }).join('\n');
+
+    const volSummary = vol.map(p =>
+      `${p.label}: spot=${p.spot ?? '?'}, vol=${p.volUsed?.toFixed(1) ?? '?'}%(${p.volSource}), 日次±${p.dailyRange ?? '?'}, 週次±${p.weeklyRange ?? '?'}`
+    ).join('\n');
+
+    const calSummary = events.length > 0
+      ? events.slice(0, 10).map(e => `${e.date ?? '?'}: ${e.title ?? '?'}`).join('\n')
+      : '直近の重要イベントなし';
+
+    return `あなたはプロのFXアナリストです。以下のデータを基に、本日の為替相場の予測とアラートを日本語で3〜5行の箇条書きで生成してください。
+
+## CFTC COTポジション（投機筋）
+${cotSummary}
+
+## FXボラティリティ & 想定レンジ
+${volSummary}
+
+## 経済カレンダー（直近イベント）
+${calSummary}
+
+## ルール
+- 箇条書き（各行を「・」で開始）で3〜5項目
+- ポジション偏りが75%超 or 25%以下の通貨は「要警戒」と明記
+- 想定レンジの端に近い通貨ペアに言及
+- 経済イベントの為替への影響を簡潔に指摘
+- 最後に総合的なリスク評価（低/中/高）を一行で記載`;
+  }
+
+  async function callGemini(prompt: string, retries = 2): Promise<string | null> {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) return null;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+    const body = {
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: { temperature: 0.4, maxOutputTokens: 2048, thinkingConfig: { thinkingBudget: 0 } },
+    };
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        const resp = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(20000),
+        });
+        if (resp.status === 429 && attempt < retries) {
+          const wait = (attempt + 1) * 5000;
+          console.warn(`[FX-AI] Gemini 429, retrying in ${wait}ms...`);
+          await new Promise(r => setTimeout(r, wait));
+          continue;
+        }
+        if (!resp.ok) {
+          console.error(`[FX-AI] Gemini HTTP ${resp.status}`);
+          return null;
+        }
+        const data = await resp.json() as any;
+        return data?.candidates?.[0]?.content?.parts?.[0]?.text ?? null;
+      } catch (err: any) {
+        console.error(`[FX-AI] Gemini error: ${err.message}`);
+        if (attempt < retries) await new Promise(r => setTimeout(r, 3000));
+      }
+    }
+    return null;
+  }
+
+  let cachedResult: { json: string; ts: number } | null = null;
+  const CACHE_TTL = 10 * 60 * 1000; // 10分キャッシュ
+
+  return {
+    name: 'fx-ai-insights',
+    configureServer(server) {
+      server.middlewares.use(async (req, res, next) => {
+        if (req.url?.split('?')[0] !== '/api/fx/ai-insights') return next();
+
+        if (cachedResult && Date.now() - cachedResult.ts < CACHE_TTL) {
+          res.setHeader('Content-Type', 'application/json');
+          res.setHeader('Cache-Control', 'public, max-age=600');
+          res.setHeader('X-Cache', 'HIT');
+          res.end(cachedResult.json);
+          return;
+        }
+
+        try {
+          const [cotRaw, volRaw, calRaw] = await Promise.all([
+            fetchRedisKey(REDIS_KEYS.cot),
+            fetchRedisKey(REDIS_KEYS.vol),
+            fetchRedisKey(REDIS_KEYS.calendar),
+          ]);
+
+          const cotData = (cotRaw as any)?.instruments as CotInst[] ?? [];
+          const volData = (volRaw as any)?.pairs as VolPair[] ?? [];
+          const calData = (calRaw as any)?.events as CalEvent[] ?? [];
+          const reportDate = (cotRaw as any)?.reportDate ?? '';
+
+          const fxCodes = new Set(['EC', 'JY', 'BP', 'SF', 'CD', 'NE']);
+          const fxCot = cotData.filter(i => fxCodes.has(i.code));
+
+          const alerts = buildRuleBasedAlerts(fxCot, volData);
+          let analysis: string | null = null;
+
+          const geminiKey = process.env.GEMINI_API_KEY;
+          if (geminiKey) {
+            const prompt = buildPrompt(fxCot, volData, calData);
+            analysis = await callGemini(prompt);
+          }
+
+          const responseJson = JSON.stringify({
+            analysis: analysis ?? alerts.join('\n'),
+            alerts,
+            source: analysis ? 'gemini' : 'rule-based',
+            reportDate,
+            generatedAt: new Date().toISOString(),
+          });
+          cachedResult = { json: responseJson, ts: Date.now() };
+          res.setHeader('Content-Type', 'application/json');
+          res.setHeader('Cache-Control', 'public, max-age=600');
+          res.setHeader('X-Cache', 'MISS');
+          res.end(responseJson);
+        } catch (err: any) {
+          console.error('[FX-AI] Error:', err);
+          res.statusCode = 500;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ error: err.message || 'AI insights generation failed' }));
+        }
+      });
+    },
+  };
+}
+
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '');
   // Inject environment variables from .env files into process.env.
@@ -765,6 +1024,8 @@ export default defineConfig(({ mode }) => {
       rssProxyPlugin(),
       youtubeLivePlugin(),
       gpsjamDevPlugin(),
+      fxDataPlugin(),
+      fxAiInsightsPlugin(),
       sebufApiPlugin(),
       brotliPrecompressPlugin(),
       VitePWA({
