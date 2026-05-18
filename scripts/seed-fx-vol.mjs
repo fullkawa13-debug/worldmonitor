@@ -7,7 +7,7 @@ import { loadEnvFile, CHROME_UA, runSeed } from './_seed-utils.mjs';
 loadEnvFile(import.meta.url);
 
 const FX_VOL_KEY = 'market:fx-vol:v1';
-const FX_VOL_TTL = 7200; // 2時間
+const FX_VOL_TTL = parseInt(process.env.FX_VOL_TTL ?? '86400', 10); // デフォルト24時間（本番cronは上書き可）
 
 // Yahoo Finance から取得する CBOE FX VIX シンボル
 const CBOE_SYMBOLS = [

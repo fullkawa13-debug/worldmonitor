@@ -750,6 +750,97 @@ function fxDataPlugin(): Plugin {
     return parsed;
   }
 
+  // FX Vol ライブフェッチ（Redis TTL切れ時のフォールバック）
+  const CBOE_SYMBOLS = [
+    { symbol: '^EVZ',   pair: 'EURUSD', label: 'EUR/USD' },
+    { symbol: '^JYVIX', pair: 'USDJPY', label: 'USD/JPY' },
+    { symbol: '^BPVIX', pair: 'GBPUSD', label: 'GBP/USD' },
+  ];
+  const FX_PAIRS = [
+    { pair: 'EURUSD', label: 'EUR/USD', ccy: 'EUR', inv: true },
+    { pair: 'GBPUSD', label: 'GBP/USD', ccy: 'GBP', inv: true },
+    { pair: 'USDJPY', label: 'USD/JPY', ccy: 'JPY', inv: false },
+    { pair: 'USDCHF', label: 'USD/CHF', ccy: 'CHF', inv: false },
+    { pair: 'USDCAD', label: 'USD/CAD', ccy: 'CAD', inv: false },
+    { pair: 'NZDUSD', label: 'NZD/USD', ccy: 'NZD', inv: true },
+  ];
+  const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
+
+  let fxVolCache: { data: unknown; ts: number } | null = null;
+  const FX_VOL_CACHE_TTL = 30 * 60 * 1000; // 30分メモリキャッシュ
+
+  async function fetchFxVolLive(): Promise<unknown | null> {
+    if (fxVolCache && Date.now() - fxVolCache.ts < FX_VOL_CACHE_TTL) return fxVolCache.data;
+    try {
+      console.log('[fx-vol] Redis empty — fetching live from CBOE/ECB...');
+      const cboeMap: Record<string, number> = {};
+      const cboeResults = await Promise.allSettled(
+        CBOE_SYMBOLS.map(async (s) => {
+          const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(s.symbol)}?interval=1d&range=5d`;
+          const resp = await fetch(url, { headers: { 'User-Agent': UA, Accept: 'application/json' }, signal: AbortSignal.timeout(10000) });
+          if (!resp.ok) return null;
+          const data = await resp.json() as any;
+          const price = data?.chart?.result?.[0]?.meta?.regularMarketPrice;
+          return typeof price === 'number' ? { pair: s.pair, iv: price } : null;
+        })
+      );
+      for (const r of cboeResults) {
+        if (r.status === 'fulfilled' && r.value) cboeMap[r.value.pair] = r.value.iv;
+      }
+
+      const today = new Date();
+      const start = new Date(today); start.setDate(start.getDate() - 45);
+      const fmt = (d: Date) => d.toISOString().slice(0, 10);
+      const symbols = FX_PAIRS.map(p => p.ccy).join(',');
+      const ecbResp = await fetch(
+        `https://api.frankfurter.app/${fmt(start)}..${fmt(today)}?base=USD&symbols=${symbols}`,
+        { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(20000) }
+      );
+      if (!ecbResp.ok) throw new Error(`ECB HTTP ${ecbResp.status}`);
+      const ecbData = await ecbResp.json() as any;
+      const ratesByDate = ecbData.rates as Record<string, Record<string, number>>;
+      const latestDate = Object.keys(ratesByDate).sort().at(-1) ?? '';
+      const latestRates = ratesByDate[latestDate] ?? {};
+
+      const pairs = FX_PAIRS.map(p => {
+        const spotRaw = latestRates[p.ccy];
+        const spot = spotRaw ? (p.inv ? 1 / spotRaw : spotRaw) : null;
+        // 実現ボラ計算
+        const dates = Object.keys(ratesByDate).sort();
+        const values = dates.map(d => { const v = ratesByDate[d]?.[p.ccy]; return v ? (p.inv ? 1 / v : v) : null; }).filter((v): v is number => v != null);
+        let rv: number | null = null;
+        if (values.length >= 5) {
+          const last30 = values.slice(-31);
+          const returns: number[] = [];
+          for (let i = 1; i < last30.length; i++) returns.push(Math.log(last30[i] / last30[i - 1]));
+          if (returns.length >= 4) {
+            const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
+            const variance = returns.reduce((a, b) => a + (b - mean) ** 2, 0) / returns.length;
+            rv = parseFloat((Math.sqrt(variance * 252) * 100).toFixed(2));
+          }
+        }
+        const iv = cboeMap[p.pair] ?? null;
+        const vol = iv ?? rv;
+        const volSource = iv != null ? 'CBOE-IV' : 'ECB-RV30d';
+        let dailyRange: number | null = null, weeklyRange: number | null = null;
+        if (spot && vol) {
+          const v = vol / 100;
+          dailyRange = parseFloat((spot * v / Math.sqrt(252)).toFixed(spot > 10 ? 2 : 4));
+          weeklyRange = parseFloat((spot * v / Math.sqrt(52)).toFixed(spot > 10 ? 2 : 4));
+        }
+        return { pair: p.pair, label: p.label, spot: spot ? parseFloat(spot.toFixed(p.ccy === 'JPY' ? 3 : 5)) : null, impliedVol: iv, realizedVol30d: rv, volUsed: vol, volSource, dailyRange, weeklyRange, rateDate: latestDate };
+      });
+
+      const result = { pairs, updatedAt: new Date().toISOString() };
+      fxVolCache = { data: result, ts: Date.now() };
+      console.log(`[fx-vol] Live fetch OK: ${pairs.length} pairs`);
+      return result;
+    } catch (err: any) {
+      console.error(`[fx-vol] Live fetch failed: ${err.message}`);
+      return fxVolCache?.data ?? null;
+    }
+  }
+
   return {
     name: 'fx-data',
     configureServer(server) {
@@ -758,7 +849,10 @@ function fxDataPlugin(): Plugin {
         if (!pathname || !ROUTES[pathname]) return next();
 
         try {
-          const data = await fetchRedisKey(ROUTES[pathname]);
+          let data = await fetchRedisKey(ROUTES[pathname]);
+          if (!data && pathname === '/api/market/fx-vol') {
+            data = await fetchFxVolLive();
+          }
           if (!data) {
             res.statusCode = 503;
             res.setHeader('Content-Type', 'application/json');
