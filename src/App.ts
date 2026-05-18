@@ -545,10 +545,10 @@ export class App {
           panelSettings[key] = { ...getEffectivePanelConfig(key, currentVariant) };
         }
       }
-      // Sync panel display names from variant defaults
+      // Sync panel config from variant defaults (name, enabled, priority)
       for (const [key, cfg] of Object.entries(DEFAULT_PANELS)) {
-        if (panelSettings[key] && cfg.name) {
-          panelSettings[key] = { ...panelSettings[key]!, name: cfg.name };
+        if (panelSettings[key]) {
+          panelSettings[key] = { ...panelSettings[key]!, ...cfg };
         }
       }
     } else {
@@ -563,10 +563,16 @@ export class App {
         DEFAULT_PANELS
       );
 
-      // Sync panel display names from variant defaults (names may have been localized)
+      // Sync panel config from variant defaults (name, enabled, priority)
       for (const [key, cfg] of Object.entries(DEFAULT_PANELS)) {
-        if (panelSettings[key] && cfg.name) {
-          panelSettings[key] = { ...panelSettings[key]!, name: cfg.name };
+        if (panelSettings[key]) {
+          panelSettings[key] = { ...panelSettings[key]!, ...cfg };
+        }
+      }
+      // Disable panels not in this variant's DEFAULT_PANELS
+      for (const key of Object.keys(panelSettings)) {
+        if (!(key in DEFAULT_PANELS) && !isDynamicPanel(key) && panelSettings[key]) {
+          panelSettings[key] = { ...panelSettings[key]!, enabled: false };
         }
       }
 

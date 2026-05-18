@@ -54,32 +54,30 @@ export const FEEDS: Record<string, Feed[]> = {
 };
 
 export const DEFAULT_PANELS: Record<string, PanelConfig> = {
-  // 優先度1: FX特化コアパネル
+  // トレード必須パネル（6枚）
+  'fx-ai-insights':     { name: 'FX AI インサイト',           enabled: true,  priority: 1 },
+  'fx-volatility':      { name: 'FX ボラティリティ＆レンジ',  enabled: true,  priority: 1 },
+  'fx-positioning':     { name: 'FX COT ポジション',         enabled: true,  priority: 1 },
   'fx-policy-rates':    { name: '政策金利 (7通貨)',            enabled: true,  priority: 1 },
   'fx-calendar':        { name: 'FX 経済カレンダー',          enabled: true,  priority: 1 },
-  'fx-positioning':     { name: 'FX COT ポジション',         enabled: true,  priority: 1 },
-  'fx-volatility':      { name: 'FX ボラティリティ＆レンジ',  enabled: true,  priority: 1 },
-  'fx-ai-insights':     { name: 'FX AI インサイト',           enabled: true,  priority: 1 },
-
-  // 優先度1: 既存流用パネル
-  map:                  { name: 'グローバルマーケットマップ',  enabled: true,  priority: 1 },
-  'live-news':          { name: 'FX ヘッドライン',            enabled: true,  priority: 1 },
-  forex:                { name: '為替・通貨',                 enabled: true,  priority: 1 },
-  centralbanks:         { name: '中央銀行ウォッチ',           enabled: true,  priority: 1 },
-  'yield-curve':        { name: 'イールドカーブ',             enabled: true,  priority: 1 },
   'macro-signals':      { name: 'マーケットレーダー',         enabled: true,  priority: 1 },
-  economic:             { name: '経済指標',                   enabled: true,  priority: 1 },
-  'economic-calendar':  { name: '経済カレンダー',             enabled: true,  priority: 1 },
-  'cot-positioning':    { name: 'COT ポジション',            enabled: true,  priority: 1 },
 
-  // 優先度2: 補助パネル
-  bonds:                { name: '債券・金利',                 enabled: true,  priority: 2 },
-  'fear-greed':         { name: '恐怖＆貪欲指数',            enabled: true,  priority: 2 },
-  'market-breadth':     { name: '市場の広がり',              enabled: true,  priority: 2 },
-  derivatives:          { name: 'デリバティブ・オプション',   enabled: true,  priority: 2 },
-  'markets-news':       { name: 'マーケットニュース',         enabled: true,  priority: 2 },
-  'economic-news':      { name: '経済ニュース',              enabled: true,  priority: 2 },
-  monitors:             { name: 'マイモニター',              enabled: true,  priority: 2 },
+  // 非表示（設定UIから再有効化可能）
+  map:                  { name: 'グローバルマーケットマップ',  enabled: false, priority: 2 },
+  'live-news':          { name: 'FX ヘッドライン',            enabled: false, priority: 2 },
+  forex:                { name: '為替・通貨',                 enabled: false, priority: 2 },
+  centralbanks:         { name: '中央銀行ウォッチ',           enabled: false, priority: 2 },
+  'yield-curve':        { name: 'イールドカーブ',             enabled: false, priority: 2 },
+  economic:             { name: '経済指標',                   enabled: false, priority: 2 },
+  'economic-calendar':  { name: '経済カレンダー',             enabled: false, priority: 2 },
+  'cot-positioning':    { name: 'COT ポジション',            enabled: false, priority: 2 },
+  bonds:                { name: '債券・金利',                 enabled: false, priority: 2 },
+  'fear-greed':         { name: '恐怖＆貪欲指数',            enabled: false, priority: 2 },
+  'market-breadth':     { name: '市場の広がり',              enabled: false, priority: 2 },
+  derivatives:          { name: 'デリバティブ・オプション',   enabled: false, priority: 2 },
+  'markets-news':       { name: 'マーケットニュース',         enabled: false, priority: 2 },
+  'economic-news':      { name: '経済ニュース',              enabled: false, priority: 2 },
+  monitors:             { name: 'マイモニター',              enabled: false, priority: 2 },
 };
 
 export const DEFAULT_MAP_LAYERS: MapLayers = {

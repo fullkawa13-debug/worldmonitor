@@ -819,6 +819,63 @@ function fxAiInsightsPlugin(): Plugin {
   }
   interface CalEvent { title?: string; date?: string; type?: string }
 
+  const NEWS_FEEDS = [
+    { label: 'Forex', url: 'https://news.google.com/rss/search?q=(%22forex%22+OR+%22currency%22+OR+%22FX+market%22)+trading+when:1d&hl=en-US&gl=US&ceid=US:en' },
+    { label: 'USD', url: 'https://news.google.com/rss/search?q=(%22dollar+index%22+OR+DXY+OR+%22US+dollar%22)+when:2d&hl=en-US&gl=US&ceid=US:en' },
+    { label: 'JPY', url: 'https://news.google.com/rss/search?q=(%22Japanese+yen%22+OR+JPY+OR+%22Bank+of+Japan%22)+when:2d&hl=en-US&gl=US&ceid=US:en' },
+    { label: 'EUR', url: 'https://news.google.com/rss/search?q=(%22euro%22+OR+EUR+OR+ECB)+monetary+when:2d&hl=en-US&gl=US&ceid=US:en' },
+    { label: 'GBP', url: 'https://news.google.com/rss/search?q=(%22British+pound%22+OR+GBP+OR+%22Bank+of+England%22)+when:2d&hl=en-US&gl=US&ceid=US:en' },
+    { label: 'CHF', url: 'https://news.google.com/rss/search?q=(%22Swiss+franc%22+OR+CHF+OR+SNB)+when:3d&hl=en-US&gl=US&ceid=US:en' },
+    { label: 'CAD', url: 'https://news.google.com/rss/search?q=(%22Canadian+dollar%22+OR+CAD+OR+%22Bank+of+Canada%22)+when:3d&hl=en-US&gl=US&ceid=US:en' },
+    { label: 'NZD', url: 'https://news.google.com/rss/search?q=(%22New+Zealand+dollar%22+OR+NZD+OR+RBNZ)+when:3d&hl=en-US&gl=US&ceid=US:en' },
+    { label: 'Central Banks', url: 'https://news.google.com/rss/search?q=(%22interest+rate%22+OR+%22monetary+policy%22+OR+%22rate+decision%22)+when:2d&hl=en-US&gl=US&ceid=US:en' },
+  ];
+
+  async function fetchNewsHeadlines(): Promise<string[]> {
+    const headlines: string[] = [];
+    const seen = new Set<string>();
+    const results = await Promise.allSettled(
+      NEWS_FEEDS.map(async (feed) => {
+        try {
+          const resp = await fetch(feed.url, {
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+              'Accept': 'application/rss+xml, application/xml, text/xml, */*',
+            },
+            signal: AbortSignal.timeout(15000),
+          });
+          if (!resp.ok) return [];
+          const xml = await resp.text();
+          const titles: string[] = [];
+          const regex = /<title><!\[CDATA\[(.*?)\]\]>|<title>(.*?)<\/title>/g;
+          let m: RegExpExecArray | null;
+          let count = 0;
+          while ((m = regex.exec(xml)) !== null && count < 4) {
+            const title = (m[1] || m[2] || '').trim();
+            if (!title || title.includes('Google News') || title.includes('search -')) continue;
+            titles.push(title);
+            count++;
+          }
+          return titles.map(t => `[${feed.label}] ${t}`);
+        } catch {
+          return [];
+        }
+      })
+    );
+    for (const r of results) {
+      if (r.status === 'fulfilled') {
+        for (const h of r.value) {
+          const norm = h.toLowerCase().replace(/\s+/g, ' ');
+          if (!seen.has(norm)) {
+            seen.add(norm);
+            headlines.push(h);
+          }
+        }
+      }
+    }
+    return headlines.slice(0, 25);
+  }
+
   function buildRuleBasedAlerts(cot: CotInst[], vol: VolPair[]): string[] {
     const alerts: string[] = [];
     const FX_CODES: Record<string, string> = { EC: 'EUR', JY: 'JPY', BP: 'GBP', SF: 'CHF', CD: 'CAD', NE: 'NZD' };
@@ -845,7 +902,7 @@ function fxAiInsightsPlugin(): Plugin {
     return alerts;
   }
 
-  function buildPrompt(cot: CotInst[], vol: VolPair[], events: CalEvent[]): string {
+  function buildPrompt(cot: CotInst[], vol: VolPair[], events: CalEvent[], newsHeadlines: string[] = []): string {
     const FX_CODES: Record<string, string> = { EC: 'EUR', JY: 'JPY', BP: 'GBP', SF: 'CHF', CD: 'CAD', NE: 'NZD' };
 
     const cotSummary = cot.map(i => {
@@ -862,7 +919,11 @@ function fxAiInsightsPlugin(): Plugin {
       ? events.slice(0, 10).map(e => `${e.date ?? '?'}: ${e.title ?? '?'}`).join('\n')
       : '直近の重要イベントなし';
 
-    return `あなたはプロのFXアナリストです。以下のデータを基に、本日の為替相場の予測とアラートを日本語で3〜5行の箇条書きで生成してください。
+    const newsSummary = newsHeadlines.length > 0
+      ? newsHeadlines.join('\n')
+      : 'ニュースヘッドライン取得なし';
+
+    return `あなたはプロのFXアナリストです。以下のデータを基に、本日の為替相場の分析を日本語で生成してください。
 
 ## CFTC COTポジション（投機筋）
 ${cotSummary}
@@ -873,12 +934,23 @@ ${volSummary}
 ## 経済カレンダー（直近イベント）
 ${calSummary}
 
-## ルール
+## 最新ニュースヘッドライン
+${newsSummary}
+
+## 出力フォーマット（必ずこの構造で出力）
+
+### 【相場分析】
 - 箇条書き（各行を「・」で開始）で3〜5項目
 - ポジション偏りが75%超 or 25%以下の通貨は「要警戒」と明記
 - 想定レンジの端に近い通貨ペアに言及
 - 経済イベントの為替への影響を簡潔に指摘
-- 最後に総合的なリスク評価（低/中/高）を一行で記載`;
+- 最後に総合的なリスク評価（低/中/高）を一行で記載
+
+### 【通貨別ニュース】
+- 上記のニュースヘッドラインから、NZD/CHF/GBP/USD/JPY/EUR/CADの7通貨に影響する重要ニュースだけをピックアップ
+- 通貨コードごとにグループ化して1〜2行で日本語要約（例：「USD: FRBの利下げ期待後退でドル高。DXY上昇」）
+- 為替に無関係なニュースは無視
+- ニュースがない通貨は省略`;
   }
 
   async function callGemini(prompt: string, retries = 2): Promise<string | null> {
@@ -887,7 +959,7 @@ ${calSummary}
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
     const body = {
       contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0.4, maxOutputTokens: 2048, thinkingConfig: { thinkingBudget: 0 } },
+      generationConfig: { temperature: 0.4, maxOutputTokens: 4096, thinkingConfig: { thinkingBudget: 0 } },
     };
     for (let attempt = 0; attempt <= retries; attempt++) {
       try {
@@ -897,9 +969,9 @@ ${calSummary}
           body: JSON.stringify(body),
           signal: AbortSignal.timeout(20000),
         });
-        if (resp.status === 429 && attempt < retries) {
+        if (!resp.ok && attempt < retries && (resp.status === 429 || resp.status >= 500)) {
           const wait = (attempt + 1) * 5000;
-          console.warn(`[FX-AI] Gemini 429, retrying in ${wait}ms...`);
+          console.warn(`[FX-AI] Gemini ${resp.status}, retrying in ${wait}ms...`);
           await new Promise(r => setTimeout(r, wait));
           continue;
         }
@@ -935,10 +1007,11 @@ ${calSummary}
         }
 
         try {
-          const [cotRaw, volRaw, calRaw] = await Promise.all([
+          const [cotRaw, volRaw, calRaw, newsHeadlines] = await Promise.all([
             fetchRedisKey(REDIS_KEYS.cot),
             fetchRedisKey(REDIS_KEYS.vol),
             fetchRedisKey(REDIS_KEYS.calendar),
+            fetchNewsHeadlines(),
           ]);
 
           const cotData = (cotRaw as any)?.instruments as CotInst[] ?? [];
@@ -954,13 +1027,14 @@ ${calSummary}
 
           const geminiKey = process.env.GEMINI_API_KEY;
           if (geminiKey) {
-            const prompt = buildPrompt(fxCot, volData, calData);
+            const prompt = buildPrompt(fxCot, volData, calData, newsHeadlines);
             analysis = await callGemini(prompt);
           }
 
           const responseJson = JSON.stringify({
             analysis: analysis ?? alerts.join('\n'),
             alerts,
+            newsHeadlines: newsHeadlines.length > 0 ? newsHeadlines : undefined,
             source: analysis ? 'gemini' : 'rule-based',
             reportDate,
             generatedAt: new Date().toISOString(),
