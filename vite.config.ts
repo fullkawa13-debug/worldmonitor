@@ -1,6 +1,6 @@
 import { defineConfig, loadEnv, type Plugin } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
-import { resolve, dirname, extname } from 'path';
+import { resolve, dirname, extname, join } from 'path';
 import { mkdir, readFile, writeFile } from 'fs/promises';
 import { brotliCompress } from 'zlib';
 import { promisify } from 'util';
@@ -726,6 +726,17 @@ function gpsjamDevPlugin(): Plugin {
  * FX custom API plugin — serves Redis-seeded data at paths the FX variant panels expect.
  * These are lightweight Redis reads that bypass the sebuf RPC layer.
  */
+async function readLocalSeedCache(key: string): Promise<unknown | null> {
+  try {
+    const filename = key.replace(/[:/]/g, '_') + '.json';
+    const filePath = join(process.cwd(), 'data', 'seed-cache', filename);
+    const content = await readFile(filePath, 'utf-8');
+    return JSON.parse(content);
+  } catch {
+    return null;
+  }
+}
+
 function fxDataPlugin(): Plugin {
   const ROUTES: Record<string, string> = {
     '/api/market/cot-enhanced': 'market:cot:v1',
@@ -735,14 +746,14 @@ function fxDataPlugin(): Plugin {
   async function fetchRedisKey(key: string): Promise<unknown | null> {
     const url = process.env.UPSTASH_REDIS_REST_URL;
     const token = process.env.UPSTASH_REDIS_REST_TOKEN;
-    if (!url || !token) return null;
+    if (!url || !token) return readLocalSeedCache(key);
     const resp = await fetch(`${url}/get/${encodeURIComponent(key)}`, {
       headers: { Authorization: `Bearer ${token}` },
       signal: AbortSignal.timeout(10000),
     });
-    if (!resp.ok) return null;
+    if (!resp.ok) return readLocalSeedCache(key);
     const json = (await resp.json()) as { result?: string };
-    if (!json.result) return null;
+    if (!json.result) return readLocalSeedCache(key);
     const parsed = JSON.parse(json.result);
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed._seed) {
       return parsed.data;
@@ -886,14 +897,14 @@ function fxAiInsightsPlugin(): Plugin {
   async function fetchRedisKey(key: string): Promise<unknown | null> {
     const url = process.env.UPSTASH_REDIS_REST_URL;
     const token = process.env.UPSTASH_REDIS_REST_TOKEN;
-    if (!url || !token) return null;
+    if (!url || !token) return readLocalSeedCache(key);
     const resp = await fetch(`${url}/get/${encodeURIComponent(key)}`, {
       headers: { Authorization: `Bearer ${token}` },
       signal: AbortSignal.timeout(10000),
     });
-    if (!resp.ok) return null;
+    if (!resp.ok) return readLocalSeedCache(key);
     const json = (await resp.json()) as { result?: string };
-    if (!json.result) return null;
+    if (!json.result) return readLocalSeedCache(key);
     const parsed = JSON.parse(json.result);
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed._seed) {
       return parsed.data;

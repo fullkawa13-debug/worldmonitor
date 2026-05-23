@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // rebuild-trigger: 2026-04-23
 
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -290,6 +290,7 @@ export async function atomicPublish(canonicalKey, data, validateFn, ttlSeconds, 
       // Cleanup staging
       await redisDel(url, token, stagingKey).catch(() => {});
 
+      saveLocalCache(canonicalKey, data);
       return { payloadBytes, recordCount: Array.isArray(data) ? data.length : null };
     },
     2,    // 2 retries (3 attempts total) — sufficient for transient blips
@@ -498,7 +499,17 @@ export async function writeExtraKey(key, data, ttl, envelopeMeta) {
     signal: AbortSignal.timeout(10_000),
   });
   if (!resp.ok) throw new Error(`Extra key ${key}: write failed (HTTP ${resp.status})`);
+  saveLocalCache(key, data);
   console.log(`  Extra key ${key}: written`);
+}
+
+function saveLocalCache(key, data) {
+  try {
+    const cacheDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'data', 'seed-cache');
+    mkdirSync(cacheDir, { recursive: true });
+    const filename = key.replace(/[:/]/g, '_') + '.json';
+    writeFileSync(join(cacheDir, filename), JSON.stringify(data, null, 0));
+  } catch { /* ローカルキャッシュ保存失敗は無視 */ }
 }
 
 export async function writeSeedMeta(dataKey, recordCount, metaKeyOverride, metaTtlSeconds) {
