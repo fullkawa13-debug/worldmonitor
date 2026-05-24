@@ -1,6 +1,6 @@
 # FX 7-Currency Dashboard 導入手順
 
-**対象リポジトリ**: `world-monitor`（AGPL-3.0, github.com/koala73/worldmonitor）  
+**対象リポジトリ**: `world-monitor`（AGPL-3.0, github.com/fullkawa13-debug/worldmonitor）  
 **バリアント名**: `fx-7ccy`  
 **対象通貨**: NZD / CHF / GBP / USD / JPY / EUR / CAD  
 
@@ -15,6 +15,7 @@ Finance variantをベースに3つのFX専用パネルを追加したダッシ�
 | Policy Rates (7 CCY) | BIS統計 API | 1時間 |
 | FX Economic Calendar | FOMC/ECB/Eurostat | 1時間 |
 | FX COT Positioning | CFTC COT（先物） | 1時間 |
+| FX Volatility & Range | CBOE FX VIX / ECB実現ボラ | 2時間 |
 
 ---
 
@@ -33,24 +34,28 @@ Finance variantをベースに3つのFX専用パネルを追加したダッシ�
 このダッシュボードは以下のファイルを追加・変更しています。  
 **別PCに移す場合はこれらを git 経由で取得するだけで完了**（git管理済みであれば）。
 
-#### 新規追加ファイル（4ファイル）
+#### 新規追加ファイル（7ファイル）
 
 ```
 src/config/variants/fx-7ccy.ts       ← バリアント設定（パネル・マップレイヤー・フィード）
 src/components/FxPolicyRatesPanel.ts  ← 政策金利パネル
 src/components/FxCalendarPanel.ts     ← 経済カレンダーパネル
 src/components/FxPositioningPanel.ts  ← COTポジションパネル
+src/components/FxVolatilityPanel.ts   ← FXボラティリティ + レンジ推定パネル
+api/market/cot-enhanced.ts           ← COTデータ配信 Edge Function
+api/market/fx-vol.ts                 ← FXボラデータ配信 Edge Function
 ```
 
 #### 変更ファイル（8ファイル）
 
 ```
-src/components/index.ts       ← 3パネルのexport追加
-src/app/panel-layout.ts       ← 3パネルのcreatePanelとimport追加
+src/components/index.ts       ← 4パネルのexport追加
+src/app/panel-layout.ts       ← 4パネルのcreatePanelとimport追加
 src/config/panels.ts          ← FX_7CCY_PANELS定義・ALL_PANELS/VARIANT_DEFAULTS追加
 src/config/variant-meta.ts    ← fx-7ccy のメタ情報（タイトル等）追加
 src/config/variant.ts         ← fx-7ccy のlocalhost/Tauri許可リスト追加
-src/App.ts                    ← fetchData()のprime/scheduleRefresh登録追加
+src/App.ts                    ← fetchData()のprime/scheduleRefresh登録追加（4パネル分）
+scripts/seed-cot.mjs          ← GBP/CHF/CAD/NZD追加・52週ヒストリー取得・limit拡張
 package.json                  ← dev:fx スクリプト追加
 ```
 
@@ -91,8 +96,11 @@ node scripts/seed-bis-data.mjs
 # 経済カレンダー（FOMC/ECB/Eurostat）
 node scripts/seed-economic-calendar.mjs
 
-# COTポジショニング（CFTC先物）
+# COTポジショニング（CFTC先物・52週折り込み度含む）
 node scripts/seed-cot.mjs
+
+# FXボラティリティ（CBOE FX VIX + ECB実現ボラ）
+node scripts/seed-fx-vol.mjs
 ```
 
 期待される出力例（各スクリプト）：
@@ -133,7 +141,8 @@ F12（開発者ツール）→ Application → Local Storage → http://localhos
 |---------|-------|
 | Policy Rates (7 CCY) | USD/EUR/GBP/JPY/CAD/CHF/NZD の金利バーが表示される |
 | FX Economic Calendar | FOMC・ECB等の予定イベントが一覧表示される |
-| FX COT Positioning | EC（EUR）・JY（JPY）等の先物ポジションバーが表示される |
+| FX COT Positioning | EC（EUR）・JY（JPY）等の先物ポジションバーと52週折り込み度が表示される |
+| FX Volatility & Range | EUR/JPY/GBP のIV（CBOE）とCHF/CAD/NZDのRV（ECB）が表示される |
 | マップ | 中央銀行・金融センター・貿易ルートのレイヤーが表示される |
 | FX Headlines | Forex/通貨ニュースが流れる |
 
@@ -239,4 +248,4 @@ node scripts/seed-bis-data.mjs
 
 ---
 
-*作成: 2026-05-16*
+*作成: 2026-05-16 / 更新: 2026-05-24（FxVolatilityPanel・seed-fx-vol・APIファイル追記、リポジトリURL修正）*
