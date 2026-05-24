@@ -1,5 +1,18 @@
+import { readFile } from 'fs/promises';
+import { join } from 'path';
 import { unwrapEnvelope } from './seed-envelope';
 import { buildUpstreamEvent, getUsageScope, sendToAxiom } from './usage';
+
+async function readLocalSeedCache(key: string): Promise<unknown | null> {
+  try {
+    const filename = key.replace(/[:/]/g, '_') + '.json';
+    const filePath = join(process.cwd(), 'data', 'seed-cache', filename);
+    const content = await readFile(filePath, 'utf-8');
+    return JSON.parse(content);
+  } catch {
+    return null;
+  }
+}
 
 const REDIS_OP_TIMEOUT_MS = 1_500;
 const REDIS_PIPELINE_TIMEOUT_MS = 5_000;
@@ -104,37 +117,25 @@ export async function getCachedJson(key: string, raw = false): Promise<unknown |
 
   const url = process.env.UPSTASH_REDIS_REST_URL;
   const token = process.env.UPSTASH_REDIS_REST_TOKEN;
-  if (!url || !token) return null;
+  if (!url || !token) return readLocalSeedCache(key);
   try {
     const finalKey = raw ? key : prefixKey(key);
     const resp = await fetch(`${url}/get/${encodeURIComponent(finalKey)}`, {
       headers: { Authorization: `Bearer ${token}` },
       signal: AbortSignal.timeout(REDIS_OP_TIMEOUT_MS),
     });
-    if (!resp.ok) return null;
+    if (!resp.ok) return readLocalSeedCache(key);
     const data = (await resp.json()) as { result?: string };
-    if (!data.result) return null;
-    // Envelope-aware by default — RPC consumers get the bare payload regardless
-    // of whether the writer has migrated to contract mode. Legacy shapes pass
-    // through unchanged (unwrapEnvelope returns {_seed: null, data: raw}).
+    if (!data.result) return readLocalSeedCache(key);
     return unwrapEnvelope(JSON.parse(data.result)).data;
   } catch (err) {
-    // Structured timeout log goes to Sentry via Vercel integration. Large-
-    // payload timeouts used to silently return null and let downstream callers
-    // cache zero-state — see docs/plans/chokepoint-rpc-payload-split.md for
-    // the incident that added this tag.
-    //
-    // AbortSignal.timeout() throws DOMException name='TimeoutError' (on V8
-    // runtimes incl. Vercel Edge); manual controller.abort() throws
-    // 'AbortError'. Checking only 'AbortError' meant the [REDIS-TIMEOUT] log
-    // never fired — every timeout fell through to the generic console.warn.
     const isTimeout = err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
     if (isTimeout) {
       console.error(`[REDIS-TIMEOUT] getCachedJson key=${key} timeoutMs=${REDIS_OP_TIMEOUT_MS}`);
     } else {
       console.warn('[redis] getCachedJson failed:', errMsg(err));
     }
-    return null;
+    return readLocalSeedCache(key);
   }
 }
 

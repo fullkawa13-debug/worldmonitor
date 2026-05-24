@@ -88,6 +88,7 @@ import {
   FxCalendarPanel,
   FxPositioningPanel,
   FxVolatilityPanel,
+  FxAiInsightsPanel,
 } from '@/components';
 import { SatelliteFiresPanel } from '@/components/SatelliteFiresPanel';
 import { focusInvestmentOnMap } from '@/services/investments-focus';
@@ -1323,6 +1324,7 @@ export class PanelLayoutManager implements AppModule {
     this.createPanel('fx-calendar', () => new FxCalendarPanel());
     this.createPanel('fx-positioning', () => new FxPositioningPanel());
     this.createPanel('fx-volatility', () => new FxVolatilityPanel());
+    this.createPanel('fx-ai-insights', () => new FxAiInsightsPanel());
     this.createPanel('macro-signals', () => new MacroSignalsPanel());
     this.createPanel('fear-greed', () => new FearGreedPanel());
     this.createPanel('aaii-sentiment', () => new AAIISentimentPanel());

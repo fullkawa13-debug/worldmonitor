@@ -930,6 +930,39 @@ const ENERGY_FEEDS: Record<string, Feed[]> = {
   ],
 };
 
+const FX_7CCY_FEEDS: Record<string, Feed[]> = {
+  forex: [
+    { name: 'Forex News', url: rss('https://news.google.com/rss/search?q=("forex"+OR+"currency"+OR+"FX+market")+trading+when:1d&hl=en-US&gl=US&ceid=US:en') },
+    { name: 'Dollar Watch', url: rss('https://news.google.com/rss/search?q=("dollar+index"+OR+DXY+OR+"US+dollar")+when:2d&hl=en-US&gl=US&ceid=US:en') },
+    { name: 'NZD News', url: rss('https://news.google.com/rss/search?q=("New+Zealand+dollar"+OR+NZD+OR+RBNZ)+when:3d&hl=en-US&gl=US&ceid=US:en') },
+    { name: 'CHF News', url: rss('https://news.google.com/rss/search?q=("Swiss+franc"+OR+CHF+OR+SNB)+when:3d&hl=en-US&gl=US&ceid=US:en') },
+    { name: 'GBP News', url: rss('https://news.google.com/rss/search?q=("British+pound"+OR+GBP+OR+"Bank+of+England")+when:2d&hl=en-US&gl=US&ceid=US:en') },
+    { name: 'JPY News', url: rss('https://news.google.com/rss/search?q=("Japanese+yen"+OR+JPY+OR+"Bank+of+Japan")+when:2d&hl=en-US&gl=US&ceid=US:en') },
+    { name: 'EUR News', url: rss('https://news.google.com/rss/search?q=("euro"+OR+EUR+OR+ECB)+monetary+when:2d&hl=en-US&gl=US&ceid=US:en') },
+    { name: 'CAD News', url: rss('https://news.google.com/rss/search?q=("Canadian+dollar"+OR+CAD+OR+"Bank+of+Canada")+when:3d&hl=en-US&gl=US&ceid=US:en') },
+  ],
+  centralbanks: [
+    { name: 'Federal Reserve', url: rss('https://www.federalreserve.gov/feeds/press_all.xml') },
+    { name: 'ECB Watch', url: rss('https://news.google.com/rss/search?q=("European+Central+Bank"+OR+ECB+OR+Lagarde)+monetary+policy+when:3d&hl=en-US&gl=US&ceid=US:en') },
+    { name: 'BoJ Watch', url: rss('https://news.google.com/rss/search?q=("Bank+of+Japan"+OR+BoJ)+monetary+policy+when:3d&hl=en-US&gl=US&ceid=US:en') },
+    { name: 'BoE Watch', url: rss('https://news.google.com/rss/search?q=("Bank+of+England"+OR+BoE)+monetary+policy+when:3d&hl=en-US&gl=US&ceid=US:en') },
+    { name: 'SNB Watch', url: rss('https://news.google.com/rss/search?q=("Swiss+National+Bank"+OR+SNB)+monetary+policy+when:7d&hl=en-US&gl=US&ceid=US:en') },
+    { name: 'BoC Watch', url: rss('https://news.google.com/rss/search?q=("Bank+of+Canada"+OR+BoC)+monetary+policy+when:7d&hl=en-US&gl=US&ceid=US:en') },
+    { name: 'RBNZ Watch', url: rss('https://news.google.com/rss/search?q=(RBNZ+OR+"Reserve+Bank+of+New+Zealand")+monetary+when:7d&hl=en-US&gl=US&ceid=US:en') },
+  ],
+  economic: [
+    { name: 'Economic Data', url: rss('https://news.google.com/rss/search?q=(CPI+OR+inflation+OR+GDP+OR+"jobs+report"+OR+PMI)+when:2d&hl=en-US&gl=US&ceid=US:en') },
+    { name: 'Trade & Tariffs', url: rss('https://news.google.com/rss/search?q=(tariff+OR+"trade+war"+OR+"trade+deficit")+when:2d&hl=en-US&gl=US&ceid=US:en') },
+  ],
+  bonds: [
+    { name: 'Bond Market', url: rss('https://news.google.com/rss/search?q=("bond+market"+OR+"treasury+yields"+OR+"yield+curve")+when:2d&hl=en-US&gl=US&ceid=US:en') },
+  ],
+  analysis: [
+    { name: 'FX Analysis', url: rss('https://news.google.com/rss/search?q=("FX+analysis"+OR+"currency+outlook"+OR+"forex+forecast")+when:3d&hl=en-US&gl=US&ceid=US:en') },
+    { name: 'Risk & Volatility', url: rss('https://news.google.com/rss/search?q=(VIX+OR+"implied+volatility"+OR+"currency+volatility")+when:3d&hl=en-US&gl=US&ceid=US:en') },
+  ],
+};
+
 // Variant-aware exports
 export const FEEDS = SITE_VARIANT === 'tech'
   ? TECH_FEEDS
@@ -941,7 +974,9 @@ export const FEEDS = SITE_VARIANT === 'tech'
         ? COMMODITY_FEEDS
         : SITE_VARIANT === 'energy'
           ? ENERGY_FEEDS
-          : FULL_FEEDS;
+          : SITE_VARIANT === 'fx-7ccy'
+            ? FX_7CCY_FEEDS
+            : FULL_FEEDS;
 
 // Canonical category→feeds map: the union of every variant's feed set.
 // `FEEDS` (above) is just the active variant's PRESET; users freely customize
@@ -957,6 +992,7 @@ export const CANONICAL_FEEDS: Record<string, Feed[]> = mergeCanonicalFeeds([
   COMMODITY_FEEDS,
   ENERGY_FEEDS,
   HAPPY_FEEDS,
+  FX_7CCY_FEEDS,
 ]);
 
 export const SOURCE_REGION_MAP: Record<string, { labelKey: string; feedKeys: string[] }> = {

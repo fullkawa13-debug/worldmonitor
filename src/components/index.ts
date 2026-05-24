@@ -92,6 +92,7 @@ export * from './FxPolicyRatesPanel';
 export * from './FxCalendarPanel';
 export * from './FxPositioningPanel';
 export * from './FxVolatilityPanel';
+export * from './FxAiInsightsPanel';
 export * from './LiquidityShiftsPanel';
 export * from './PositioningPanel';
 export * from './GoldIntelligencePanel';

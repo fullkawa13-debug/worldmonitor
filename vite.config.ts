@@ -1,6 +1,6 @@
 import { defineConfig, loadEnv, type Plugin } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
-import { resolve, dirname, extname } from 'path';
+import { resolve, dirname, extname, join } from 'path';
 import { mkdir, readFile, writeFile } from 'fs/promises';
 import { brotliCompress } from 'zlib';
 import { promisify } from 'util';
@@ -722,6 +722,444 @@ function gpsjamDevPlugin(): Plugin {
   };
 }
 
+/**
+ * FX custom API plugin — serves Redis-seeded data at paths the FX variant panels expect.
+ * These are lightweight Redis reads that bypass the sebuf RPC layer.
+ */
+async function readLocalSeedCache(key: string): Promise<unknown | null> {
+  try {
+    const filename = key.replace(/[:/]/g, '_') + '.json';
+    const filePath = join(process.cwd(), 'data', 'seed-cache', filename);
+    const content = await readFile(filePath, 'utf-8');
+    return JSON.parse(content);
+  } catch {
+    return null;
+  }
+}
+
+function fxDataPlugin(): Plugin {
+  const ROUTES: Record<string, string> = {
+    '/api/market/cot-enhanced': 'market:cot:v1',
+    '/api/market/fx-vol': 'market:fx-vol:v1',
+  };
+
+  async function fetchRedisKey(key: string): Promise<unknown | null> {
+    const url = process.env.UPSTASH_REDIS_REST_URL;
+    const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+    if (!url || !token) return readLocalSeedCache(key);
+    const resp = await fetch(`${url}/get/${encodeURIComponent(key)}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!resp.ok) return readLocalSeedCache(key);
+    const json = (await resp.json()) as { result?: string };
+    if (!json.result) return readLocalSeedCache(key);
+    const parsed = JSON.parse(json.result);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed._seed) {
+      return parsed.data;
+    }
+    return parsed;
+  }
+
+  // FX Vol ライブフェッチ（Redis TTL切れ時のフォールバック）
+  const CBOE_SYMBOLS = [
+    { symbol: '^EVZ',   pair: 'EURUSD', label: 'EUR/USD' },
+    { symbol: '^JYVIX', pair: 'USDJPY', label: 'USD/JPY' },
+    { symbol: '^BPVIX', pair: 'GBPUSD', label: 'GBP/USD' },
+  ];
+  const FX_PAIRS = [
+    { pair: 'EURUSD', label: 'EUR/USD', ccy: 'EUR', inv: true },
+    { pair: 'GBPUSD', label: 'GBP/USD', ccy: 'GBP', inv: true },
+    { pair: 'USDJPY', label: 'USD/JPY', ccy: 'JPY', inv: false },
+    { pair: 'USDCHF', label: 'USD/CHF', ccy: 'CHF', inv: false },
+    { pair: 'USDCAD', label: 'USD/CAD', ccy: 'CAD', inv: false },
+    { pair: 'NZDUSD', label: 'NZD/USD', ccy: 'NZD', inv: true },
+  ];
+  const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
+
+  let fxVolCache: { data: unknown; ts: number } | null = null;
+  const FX_VOL_CACHE_TTL = 30 * 60 * 1000; // 30分メモリキャッシュ
+
+  async function fetchFxVolLive(): Promise<unknown | null> {
+    if (fxVolCache && Date.now() - fxVolCache.ts < FX_VOL_CACHE_TTL) return fxVolCache.data;
+    try {
+      console.log('[fx-vol] Redis empty — fetching live from CBOE/ECB...');
+      const cboeMap: Record<string, number> = {};
+      const cboeResults = await Promise.allSettled(
+        CBOE_SYMBOLS.map(async (s) => {
+          const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(s.symbol)}?interval=1d&range=5d`;
+          const resp = await fetch(url, { headers: { 'User-Agent': UA, Accept: 'application/json' }, signal: AbortSignal.timeout(10000) });
+          if (!resp.ok) return null;
+          const data = await resp.json() as any;
+          const price = data?.chart?.result?.[0]?.meta?.regularMarketPrice;
+          return typeof price === 'number' ? { pair: s.pair, iv: price } : null;
+        })
+      );
+      for (const r of cboeResults) {
+        if (r.status === 'fulfilled' && r.value) cboeMap[r.value.pair] = r.value.iv;
+      }
+
+      const today = new Date();
+      const start = new Date(today); start.setDate(start.getDate() - 45);
+      const fmt = (d: Date) => d.toISOString().slice(0, 10);
+      const symbols = FX_PAIRS.map(p => p.ccy).join(',');
+      const ecbResp = await fetch(
+        `https://api.frankfurter.app/${fmt(start)}..${fmt(today)}?base=USD&symbols=${symbols}`,
+        { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(20000) }
+      );
+      if (!ecbResp.ok) throw new Error(`ECB HTTP ${ecbResp.status}`);
+      const ecbData = await ecbResp.json() as any;
+      const ratesByDate = ecbData.rates as Record<string, Record<string, number>>;
+      const latestDate = Object.keys(ratesByDate).sort().at(-1) ?? '';
+      const latestRates = ratesByDate[latestDate] ?? {};
+
+      const pairs = FX_PAIRS.map(p => {
+        const spotRaw = latestRates[p.ccy];
+        const spot = spotRaw ? (p.inv ? 1 / spotRaw : spotRaw) : null;
+        // 実現ボラ計算
+        const dates = Object.keys(ratesByDate).sort();
+        const values = dates.map(d => { const v = ratesByDate[d]?.[p.ccy]; return v ? (p.inv ? 1 / v : v) : null; }).filter((v): v is number => v != null);
+        let rv: number | null = null;
+        if (values.length >= 5) {
+          const last30 = values.slice(-31);
+          const returns: number[] = [];
+          for (let i = 1; i < last30.length; i++) returns.push(Math.log(last30[i] / last30[i - 1]));
+          if (returns.length >= 4) {
+            const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
+            const variance = returns.reduce((a, b) => a + (b - mean) ** 2, 0) / returns.length;
+            rv = parseFloat((Math.sqrt(variance * 252) * 100).toFixed(2));
+          }
+        }
+        const iv = cboeMap[p.pair] ?? null;
+        const vol = iv ?? rv;
+        const volSource = iv != null ? 'CBOE-IV' : 'ECB-RV30d';
+        let dailyRange: number | null = null, weeklyRange: number | null = null;
+        if (spot && vol) {
+          const v = vol / 100;
+          dailyRange = parseFloat((spot * v / Math.sqrt(252)).toFixed(spot > 10 ? 2 : 4));
+          weeklyRange = parseFloat((spot * v / Math.sqrt(52)).toFixed(spot > 10 ? 2 : 4));
+        }
+        return { pair: p.pair, label: p.label, spot: spot ? parseFloat(spot.toFixed(p.ccy === 'JPY' ? 3 : 5)) : null, impliedVol: iv, realizedVol30d: rv, volUsed: vol, volSource, dailyRange, weeklyRange, rateDate: latestDate };
+      });
+
+      const result = { pairs, updatedAt: new Date().toISOString() };
+      fxVolCache = { data: result, ts: Date.now() };
+      console.log(`[fx-vol] Live fetch OK: ${pairs.length} pairs`);
+      return result;
+    } catch (err: any) {
+      console.error(`[fx-vol] Live fetch failed: ${err.message}`);
+      return fxVolCache?.data ?? null;
+    }
+  }
+
+  return {
+    name: 'fx-data',
+    configureServer(server) {
+      server.middlewares.use(async (req, res, next) => {
+        const pathname = req.url?.split('?')[0];
+        if (!pathname || !ROUTES[pathname]) return next();
+
+        try {
+          let data = await fetchRedisKey(ROUTES[pathname]);
+          if (!data && pathname === '/api/market/fx-vol') {
+            data = await fetchFxVolLive();
+          }
+          if (!data) {
+            res.statusCode = 503;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ unavailable: true, error: 'No data in Redis. Run the seed script.' }));
+            return;
+          }
+          res.setHeader('Content-Type', 'application/json');
+          res.setHeader('Cache-Control', 'public, max-age=300');
+          res.end(JSON.stringify(data));
+        } catch (err: any) {
+          res.statusCode = 502;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ unavailable: true, error: err.message || 'Redis fetch failed' }));
+        }
+      });
+    },
+  };
+}
+
+/**
+ * FX AI Insights plugin — COT/Vol/Calendarデータを集約してGemini APIで日本語分析を生成。
+ * Gemini無料枠で動作。GEMINI_API_KEY が未設定なら静的ルールベースにフォールバック。
+ */
+function fxAiInsightsPlugin(): Plugin {
+  const REDIS_KEYS = {
+    cot: 'market:cot:v1',
+    vol: 'market:fx-vol:v1',
+    calendar: 'economic:econ-calendar:v1',
+  };
+
+  async function fetchRedisKey(key: string): Promise<unknown | null> {
+    const url = process.env.UPSTASH_REDIS_REST_URL;
+    const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+    if (!url || !token) return readLocalSeedCache(key);
+    const resp = await fetch(`${url}/get/${encodeURIComponent(key)}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!resp.ok) return readLocalSeedCache(key);
+    const json = (await resp.json()) as { result?: string };
+    if (!json.result) return readLocalSeedCache(key);
+    const parsed = JSON.parse(json.result);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed._seed) {
+      return parsed.data;
+    }
+    return parsed;
+  }
+
+  interface CotInst {
+    code: string; name: string; reportDate: string; netPct: number;
+    managedMoney?: { netPct: number; wowNetDelta: number };
+    percentile52w?: number; crowded?: string;
+  }
+  interface VolPair {
+    pair: string; label: string; spot: number | null;
+    volUsed: number | null; volSource: string;
+    dailyRange: number | null; weeklyRange: number | null;
+  }
+  interface CalEvent { title?: string; date?: string; type?: string }
+
+  const NEWS_FEEDS = [
+    { label: 'Forex', url: 'https://news.google.com/rss/search?q=(%22forex%22+OR+%22currency%22+OR+%22FX+market%22)+trading+when:1d&hl=en-US&gl=US&ceid=US:en' },
+    { label: 'USD', url: 'https://news.google.com/rss/search?q=(%22dollar+index%22+OR+DXY+OR+%22US+dollar%22)+when:2d&hl=en-US&gl=US&ceid=US:en' },
+    { label: 'JPY', url: 'https://news.google.com/rss/search?q=(%22Japanese+yen%22+OR+JPY+OR+%22Bank+of+Japan%22)+when:2d&hl=en-US&gl=US&ceid=US:en' },
+    { label: 'EUR', url: 'https://news.google.com/rss/search?q=(%22euro%22+OR+EUR+OR+ECB)+monetary+when:2d&hl=en-US&gl=US&ceid=US:en' },
+    { label: 'GBP', url: 'https://news.google.com/rss/search?q=(%22British+pound%22+OR+GBP+OR+%22Bank+of+England%22)+when:2d&hl=en-US&gl=US&ceid=US:en' },
+    { label: 'CHF', url: 'https://news.google.com/rss/search?q=(%22Swiss+franc%22+OR+CHF+OR+SNB)+when:3d&hl=en-US&gl=US&ceid=US:en' },
+    { label: 'CAD', url: 'https://news.google.com/rss/search?q=(%22Canadian+dollar%22+OR+CAD+OR+%22Bank+of+Canada%22)+when:3d&hl=en-US&gl=US&ceid=US:en' },
+    { label: 'NZD', url: 'https://news.google.com/rss/search?q=(%22New+Zealand+dollar%22+OR+NZD+OR+RBNZ)+when:3d&hl=en-US&gl=US&ceid=US:en' },
+    { label: 'Central Banks', url: 'https://news.google.com/rss/search?q=(%22interest+rate%22+OR+%22monetary+policy%22+OR+%22rate+decision%22)+when:2d&hl=en-US&gl=US&ceid=US:en' },
+  ];
+
+  async function fetchNewsHeadlines(): Promise<string[]> {
+    const headlines: string[] = [];
+    const seen = new Set<string>();
+    const results = await Promise.allSettled(
+      NEWS_FEEDS.map(async (feed) => {
+        try {
+          const resp = await fetch(feed.url, {
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+              'Accept': 'application/rss+xml, application/xml, text/xml, */*',
+            },
+            signal: AbortSignal.timeout(15000),
+          });
+          if (!resp.ok) return [];
+          const xml = await resp.text();
+          const titles: string[] = [];
+          const regex = /<title><!\[CDATA\[(.*?)\]\]>|<title>(.*?)<\/title>/g;
+          let m: RegExpExecArray | null;
+          let count = 0;
+          while ((m = regex.exec(xml)) !== null && count < 4) {
+            const title = (m[1] || m[2] || '').trim();
+            if (!title || title.includes('Google News') || title.includes('search -')) continue;
+            titles.push(title);
+            count++;
+          }
+          return titles.map(t => `[${feed.label}] ${t}`);
+        } catch {
+          return [];
+        }
+      })
+    );
+    for (const r of results) {
+      if (r.status === 'fulfilled') {
+        for (const h of r.value) {
+          const norm = h.toLowerCase().replace(/\s+/g, ' ');
+          if (!seen.has(norm)) {
+            seen.add(norm);
+            headlines.push(h);
+          }
+        }
+      }
+    }
+    return headlines.slice(0, 25);
+  }
+
+  function buildRuleBasedAlerts(cot: CotInst[], vol: VolPair[]): string[] {
+    const alerts: string[] = [];
+    const FX_CODES: Record<string, string> = { EC: 'EUR', JY: 'JPY', BP: 'GBP', SF: 'CHF', CD: 'CAD', NE: 'NZD' };
+    for (const inst of cot) {
+      const label = FX_CODES[inst.code] || inst.code;
+      const pct = inst.percentile52w ?? 0;
+      const crowd = inst.crowded ?? 'neutral';
+      if (crowd === 'extreme_long' || crowd === 'extreme_short') {
+        const dir = crowd === 'extreme_long' ? '買い越し' : '売り越し';
+        alerts.push(`⚠️ 要警戒: ${label} の投機筋ポジションが${dir}極端水準（52週${pct}%）。反転リスクに注意。`);
+      } else if (pct >= 75 || pct <= 25) {
+        const dir = pct >= 75 ? '買い越し寄り' : '売り越し寄り';
+        alerts.push(`📊 ${label}: ポジション偏り ${pct}%（${dir}）。トレンド継続 or 巻き戻しに注目。`);
+      }
+    }
+    for (const p of vol) {
+      if (p.volUsed && p.volUsed >= 12) {
+        alerts.push(`📈 ${p.label}: 年率ボラ ${p.volUsed.toFixed(1)}% — 高ボラ環境。日次想定レンジ ±${p.dailyRange ?? '?'}に注意。`);
+      }
+    }
+    if (alerts.length === 0) {
+      alerts.push('✅ 現時点で特段のアラートなし。ポジション・ボラティリティとも通常範囲内。');
+    }
+    return alerts;
+  }
+
+  function buildPrompt(cot: CotInst[], vol: VolPair[], events: CalEvent[], newsHeadlines: string[] = []): string {
+    const FX_CODES: Record<string, string> = { EC: 'EUR', JY: 'JPY', BP: 'GBP', SF: 'CHF', CD: 'CAD', NE: 'NZD' };
+
+    const cotSummary = cot.map(i => {
+      const label = FX_CODES[i.code] || i.code;
+      const mm = i.managedMoney;
+      return `${label}: net=${mm?.netPct?.toFixed(1) ?? i.netPct?.toFixed(1)}%, 52週=${i.percentile52w ?? '?'}%(${i.crowded ?? '?'}), WoW変化=${mm?.wowNetDelta ?? '?'}`;
+    }).join('\n');
+
+    const volSummary = vol.map(p =>
+      `${p.label}: spot=${p.spot ?? '?'}, vol=${p.volUsed?.toFixed(1) ?? '?'}%(${p.volSource}), 日次±${p.dailyRange ?? '?'}, 週次±${p.weeklyRange ?? '?'}`
+    ).join('\n');
+
+    const calSummary = events.length > 0
+      ? events.slice(0, 10).map(e => `${e.date ?? '?'}: ${e.title ?? '?'}`).join('\n')
+      : '直近の重要イベントなし';
+
+    const newsSummary = newsHeadlines.length > 0
+      ? newsHeadlines.join('\n')
+      : 'ニュースヘッドライン取得なし';
+
+    return `あなたはプロのFXアナリストです。以下のデータを基に、本日の為替相場の分析を日本語で生成してください。
+
+## CFTC COTポジション（投機筋）
+${cotSummary}
+
+## FXボラティリティ & 想定レンジ
+${volSummary}
+
+## 経済カレンダー（直近イベント）
+${calSummary}
+
+## 最新ニュースヘッドライン
+${newsSummary}
+
+## 出力フォーマット（必ずこの構造で出力）
+
+### 【相場分析】
+- 箇条書き（各行を「・」で開始）で3〜5項目
+- ポジション偏りが75%超 or 25%以下の通貨は「要警戒」と明記
+- 想定レンジの端に近い通貨ペアに言及
+- 経済イベントの為替への影響を簡潔に指摘
+- 最後に総合的なリスク評価（低/中/高）を一行で記載
+
+### 【通貨別ニュース】
+- 上記のニュースヘッドラインから、NZD/CHF/GBP/USD/JPY/EUR/CADの7通貨に影響する重要ニュースだけをピックアップ
+- 通貨コードごとにグループ化して1〜2行で日本語要約（例：「USD: FRBの利下げ期待後退でドル高。DXY上昇」）
+- 為替に無関係なニュースは無視
+- ニュースがない通貨は省略`;
+  }
+
+  async function callGemini(prompt: string, retries = 2): Promise<string | null> {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) return null;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+    const body = {
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: { temperature: 0.4, maxOutputTokens: 4096, thinkingConfig: { thinkingBudget: 0 } },
+    };
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        const resp = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(20000),
+        });
+        if (!resp.ok && attempt < retries && (resp.status === 429 || resp.status >= 500)) {
+          const wait = (attempt + 1) * 5000;
+          console.warn(`[FX-AI] Gemini ${resp.status}, retrying in ${wait}ms...`);
+          await new Promise(r => setTimeout(r, wait));
+          continue;
+        }
+        if (!resp.ok) {
+          console.error(`[FX-AI] Gemini HTTP ${resp.status}`);
+          return null;
+        }
+        const data = await resp.json() as any;
+        return data?.candidates?.[0]?.content?.parts?.[0]?.text ?? null;
+      } catch (err: any) {
+        console.error(`[FX-AI] Gemini error: ${err.message}`);
+        if (attempt < retries) await new Promise(r => setTimeout(r, 3000));
+      }
+    }
+    return null;
+  }
+
+  let cachedResult: { json: string; ts: number } | null = null;
+  const CACHE_TTL = 10 * 60 * 1000; // 10分キャッシュ
+
+  return {
+    name: 'fx-ai-insights',
+    configureServer(server) {
+      server.middlewares.use(async (req, res, next) => {
+        if (req.url?.split('?')[0] !== '/api/fx/ai-insights') return next();
+
+        if (cachedResult && Date.now() - cachedResult.ts < CACHE_TTL) {
+          res.setHeader('Content-Type', 'application/json');
+          res.setHeader('Cache-Control', 'public, max-age=600');
+          res.setHeader('X-Cache', 'HIT');
+          res.end(cachedResult.json);
+          return;
+        }
+
+        try {
+          const [cotRaw, volRaw, calRaw, newsHeadlines] = await Promise.all([
+            fetchRedisKey(REDIS_KEYS.cot),
+            fetchRedisKey(REDIS_KEYS.vol),
+            fetchRedisKey(REDIS_KEYS.calendar),
+            fetchNewsHeadlines(),
+          ]);
+
+          const cotData = (cotRaw as any)?.instruments as CotInst[] ?? [];
+          const volData = (volRaw as any)?.pairs as VolPair[] ?? [];
+          const calData = (calRaw as any)?.events as CalEvent[] ?? [];
+          const reportDate = (cotRaw as any)?.reportDate ?? '';
+
+          const fxCodes = new Set(['EC', 'JY', 'BP', 'SF', 'CD', 'NE']);
+          const fxCot = cotData.filter(i => fxCodes.has(i.code));
+
+          const alerts = buildRuleBasedAlerts(fxCot, volData);
+          let analysis: string | null = null;
+
+          const geminiKey = process.env.GEMINI_API_KEY;
+          if (geminiKey) {
+            const prompt = buildPrompt(fxCot, volData, calData, newsHeadlines);
+            analysis = await callGemini(prompt);
+          }
+
+          const responseJson = JSON.stringify({
+            analysis: analysis ?? alerts.join('\n'),
+            alerts,
+            newsHeadlines: newsHeadlines.length > 0 ? newsHeadlines : undefined,
+            source: analysis ? 'gemini' : 'rule-based',
+            reportDate,
+            generatedAt: new Date().toISOString(),
+          });
+          cachedResult = { json: responseJson, ts: Date.now() };
+          res.setHeader('Content-Type', 'application/json');
+          res.setHeader('Cache-Control', 'public, max-age=600');
+          res.setHeader('X-Cache', 'MISS');
+          res.end(responseJson);
+        } catch (err: any) {
+          console.error('[FX-AI] Error:', err);
+          res.statusCode = 500;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ error: err.message || 'AI insights generation failed' }));
+        }
+      });
+    },
+  };
+}
+
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '');
   // Inject environment variables from .env files into process.env.
@@ -765,6 +1203,8 @@ export default defineConfig(({ mode }) => {
       rssProxyPlugin(),
       youtubeLivePlugin(),
       gpsjamDevPlugin(),
+      fxDataPlugin(),
+      fxAiInsightsPlugin(),
       sebufApiPlugin(),
       brotliPrecompressPlugin(),
       VitePWA({

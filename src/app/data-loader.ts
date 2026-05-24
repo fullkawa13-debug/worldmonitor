@@ -400,6 +400,8 @@ export class DataLoaderManager implements AppModule {
     // Desktop: server digest has fewer categories than client FEEDS config.
     // Enable per-feed RSS fallback so missing categories fetch directly.
     if (isDesktopRuntime()) return true;
+    // Dev server: digest server doesn't carry custom variant categories
+    if (import.meta.env.DEV) return true;
     return isFeatureEnabled('newsPerFeedFallback');
   }
 
